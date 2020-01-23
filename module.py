@@ -164,7 +164,7 @@ class LSTMModule(nn.Module):
         for entry,head in zip(sentence,heads):
             entry.pred_parent_id = head
             
-      def forward(self,sentence,errs,lerrs):
+      def forward(self,sentence,errs):
           for entry in sentence:
             wordvec = self.wlookup(scalar(int(self.vocab.get(entry.word,0)))) if self.wdims>0 else None
             posvec = self.plookup(scalar(int(self.pos[entry.pos]))) if self.pdims > 0 else None
@@ -184,7 +184,69 @@ class LSTMModule(nn.Module):
           heads =decoder.parse_proj(scores)  
           gold = [entry.parent_id for entry in sentence] #事先标注好的父节点下标
           e = sum([1 for h,g in zip(gold[1:],heads[1:]) if h!=g])#父节点预测出错的个数
+          constant_zero = torch.tensor([[0.]],requires_grad=False)
           if e>0:
-            errs+=[]
+            errs+=[torch.max((exprs[h][i]-exprs[g][i]),constant_zero)[0][0] for i,(h,g) in enumerate(heads,gold) if h!=g]#errs是每一句话的真实损失值
+          return e#返回错误的个数
+def get_optim(opt,parameters):
+  if opt =='sgd':
+      return optim.SGD(parameters,lr=opt.lr)
+  elif opt =='adam':
+      return optim.Adam(parameters)  
+
+class WrapperParser:
+      def __init__(self,vocab,pos,w2i,options):
+        model = LSTMModule(vocab,pos,w2i,options)
+        self.model = model.cuda() if use_gpu else model
+        self.trainer = get_optim(options.optim,self.model.parameters())
+        
+      def predict(self,conll_path):
+        with open(conll_path,'r') as r:
+            for i,sentence in enumerate(read_conll(r)):
+                conll_sentence = [entry for entry in sentence if isinstance(entry,utils.ConllEntry)]
+                self.model.predict(conll_sentence)
+                yield conll_sentence
+      def train(self, conll_path):
+        print(torch.__version__)
+        batch = 1
+        eloss = 0
+        etotal = 0
+        start = time.time()
+        with open(conll_path, 'r') as r:
+            data = read_conll(r)
+            errs = []
+            #lerrs = []#标签预测的损失值，暂时不用
+            for i,sentence in enumerate(data):
+                if i%100==0 and i!=0:
+                    print('='*20)
+                    print('Processing sentence number: {}'.format(i))
+                    print('Errors: {}'.format(eloss/etotal))
+                    print('Time: {}'.format(time.time()-start))
+                    start = time.time()
+                    eloss=0
+                    etotal=0
+                conll_sentence = [entry for entry in sentence if isinstance(entry, utils.ConllEntry)]
+                e = self.model.forward(conll_sentence,errs)
+                eloss+=e
+                etotal+=len(conll_sentence)
+                
+                if i%batch==0 and i!=0:
+                    self.trainer.zero_grad()
+                    backerrs = sum(errs)
+                    backerrs.backward()
+                    self.trainer.step()
+                    errs = []
+            if len(errs)>0:
+                self.trainer.zero_grad()
+                backerrs = sum(errs)
+                backerrs.backward()
+                self.trainer.step()
+                errs = []
+                
+            print('One epoch finished!!!')
+            print('Accuracy:{}'.format(1-eloss/etotal))
+                
+                
+          
         
         
